@@ -20,6 +20,7 @@ def window():
     label = QtWidgets.QLabel(win)
     label.setText("Hello in D browser")
     label.move(50, 50)
+    
     #chromium engine to load the web page
     browser = QWebEngineView(win)
     browser.load(QUrl("https://www.google.com"))
