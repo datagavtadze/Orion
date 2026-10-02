@@ -12,6 +12,11 @@
 - ⭐ **Bookmarks System:** Save your favorite websites locally with a single click.
 - ⚡ **Lightweight & Fast:** Optimized memory footprint using Chromium rendering.
 
+### 🎨 Modern Custom GUI
+
+- **Custom Purple Aesthetic:** Designed a sleek, dark-mode purple UI that replaces the plain default browser look with a modern, futuristic vibe.
+- **Enhanced UX:** Built with custom stylesheets (QSS) for clean spacing, smooth rounded tabs, and better visual clarity.
+
 ---
 
 ## 🛠️ Tech Stack

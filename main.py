@@ -10,12 +10,15 @@ import sys
 import json
 import os
 
+HOME_URL = QUrl.fromLocalFile(os.path.abspath("home.html"))
+
 HISTORY_FILE = "history.json"
 BOOKMARKS_FILE = "bookmarks.json"
 
 class OrionBrowser(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setStyleSheet(GALAXY_QSS)
         self.setWindowTitle("Orion Browser")
         self.setGeometry(100, 100, 1200, 800)
 
@@ -60,7 +63,7 @@ class OrionBrowser(QMainWindow):
         history_btn.triggered.connect(lambda: self.show_history())
         navbar.addAction(history_btn)
 
-        self.add_new_tab(QUrl("http://www.google.com"), "homepage")
+        self.add_new_tab(HOME_URL, "homepage")
 
     def init_storage(self):
         if not os.path.exists(HISTORY_FILE):
@@ -153,7 +156,51 @@ class OrionBrowser(QMainWindow):
                 json.dump(history, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print("History error:", e)
-        
+
+GALAXY_QSS = """
+QMainWindow, QWidget {
+    background-color: #0b0720;      /* deep space */
+    color: #e6dcff;
+    font-family: 'Segoe UI';
+    font-size: 14px;
+}
+
+QLineEdit {                          /* address bar */
+    background-color: #1a1040;
+    border: 2px solid #7b2ff7;
+    border-radius: 14px;
+    padding: 6px 14px;
+    color: #ffffff;
+    selection-background-color: #b57bff;
+}
+QLineEdit:focus { border: 2px solid #c77dff; }
+
+QPushButton, QToolButton {
+    background-color: #2a1766;
+    border: 1px solid #7b2ff7;
+    border-radius: 10px;
+    padding: 6px 12px;
+}
+QPushButton:hover, QToolButton:hover { background-color: #7b2ff7; }
+QPushButton:pressed, QToolButton:pressed { background-color: #5a1fc0; }
+
+QToolBar { background: #120a30; border: none; spacing: 6px; padding: 4px; }
+
+QTabWidget::pane { border: none; }
+QTabBar::tab {
+    background: #1a1040;
+    color: #cbb8ff;
+    padding: 8px 18px;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+    margin-right: 2px;
+}
+QTabBar::tab:selected { background: #7b2ff7; color: white; }
+QTabBar::tab:hover:!selected { background: #3a1f8a; }
+
+QScrollBar:vertical { background: #0b0720; width: 10px; }
+QScrollBar::handle:vertical { background: #7b2ff7; border-radius: 5px; }
+"""
 
 
 if __name__ == "__main__":
