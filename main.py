@@ -4,13 +4,38 @@ from turtle import title
 
 from PyQt5 import QtWidgets
 from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar, QAction, QLineEdit
-from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings
 from PyQt5.QtCore import QUrl
 import sys
 import json
 import os
 
-HOME_URL = QUrl.fromLocalFile(os.path.abspath("home.html"))
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join([
+    "--disable-gpu",
+    "--enable-low-end-device-mode",
+    "--renderer-process-limit=2",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-sync",
+    "--disable-smooth-scrolling",
+    '--js-flags=--max-old-space-size=256',
+    "--disk-cache-size=52428800", ])
+
+
+HOME_PAGE_URL = QUrl.fromLocalFile("/home/david/python/home.html")
+
+def add_new_tab(self, qurl=None, label="New Tab"):
+    
+    if qurl is None or qurl.toString() == "":
+        qurl = HOME_PAGE_URL
+
+    browser = QWebEngineView()
+    browser.setUrl(qurl)
+
+    index = self.tabs.addTab(browser, label)
+    self.tabs.setCurrentIndex(index)
+
+    
 
 HISTORY_FILE = "history.json"
 BOOKMARKS_FILE = "bookmarks.json"
@@ -20,7 +45,7 @@ class OrionBrowser(QMainWindow):
         super().__init__()
         self.setStyleSheet(GALAXY_QSS)
         self.setWindowTitle("Orion Browser")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1920, 1080)
 
         self.init_storage()
 
@@ -48,7 +73,7 @@ class OrionBrowser(QMainWindow):
         navbar.addAction(reload_btn)
 
         add_tab_btn = QAction("+", self)
-        add_tab_btn.triggered.connect(lambda: self.add_new_tab(QUrl("http://www.google.com")))
+        add_tab_btn.triggered.connect(lambda: self.add_new_tab(HOME_PAGE_URL, "New Tab"))
         navbar.addAction(add_tab_btn)
 
         bookmark_btn = QAction("★", self)
@@ -63,7 +88,7 @@ class OrionBrowser(QMainWindow):
         history_btn.triggered.connect(lambda: self.show_history())
         navbar.addAction(history_btn)
 
-        self.add_new_tab(HOME_URL, "homepage")
+        self.add_new_tab(HOME_PAGE_URL, "homepage")
 
     def init_storage(self):
         if not os.path.exists(HISTORY_FILE):
@@ -78,12 +103,17 @@ class OrionBrowser(QMainWindow):
         return self.tabs.currentWidget()
 
     def add_new_tab(self, qurl=None, label="New Tab"):
-        if qurl is None:
-            qurl = QUrl("http://www.google.com")
+        if not isinstance(qurl, QUrl):
+            qurl = HOME_PAGE_URL
 
         browser = QWebEngineView()
+        s = browser.settings()
+        s.setAttribute(QWebEngineSettings.PluginsEnabled, False)
+        s.setAttribute(QWebEngineSettings.WebGLEnabled, False)
+        s.setAttribute(QWebEngineSettings.Accelerated2dCanvasEnabled, False)
+        s.setAttribute(QWebEngineSettings.ScrollAnimatorEnabled, False)
         browser.setUrl(qurl)
-        
+
         index = self.tabs.addTab(browser, label)
         self.tabs.setCurrentIndex(index)
 
