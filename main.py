@@ -1,41 +1,30 @@
 #PyQt5 is a set of Python bindings for Qt libraries which can be used to create cross-platform applications. Below is a simple example of how to create a basic browser window using PyQt5.
-import http
-from turtle import title
 
-from PyQt5 import QtWidgets
-from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar, QAction, QLineEdit
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings
-from PyQt5.QtCore import QUrl
-import sys
 import json
 import os
+import sys
+import traceback
 
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join([
-    "--disable-gpu",
-    "--enable-low-end-device-mode",
-    "--renderer-process-limit=2",
-    "--disable-extensions",
-    "--disable-background-networking",
-    "--disable-sync",
-    "--disable-smooth-scrolling",
-    '--js-flags=--max-old-space-size=256',
-    "--disk-cache-size=52428800", ])
+# Qt WebEngine on Wayland often crashes with EGL_BAD_CONTEXT /
+# "The Wayland connection experienced a fatal error". Use XWayland
+# and Chromium software rendering before any Qt modules load.
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+os.environ.setdefault(
+    "QTWEBENGINE_CHROMIUM_FLAGS",
+    "--disable-gpu --disable-gpu-compositing --disable-gpu-sandbox",
+)
+
+from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar, QAction, QLineEdit
+from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtCore import Qt, QUrl
 
 
-HOME_PAGE_URL = QUrl.fromLocalFile("/home/david/python/home.html")
+def show_error(exc_type, exc_value, exc_tb):
+    traceback.print_exception(exc_type, exc_value, exc_tb)
 
-def add_new_tab(self, qurl=None, label="New Tab"):
-    
-    if qurl is None or qurl.toString() == "":
-        qurl = HOME_PAGE_URL
+sys.excepthook = show_error
 
-    browser = QWebEngineView()
-    browser.setUrl(qurl)
-
-    index = self.tabs.addTab(browser, label)
-    self.tabs.setCurrentIndex(index)
-
-    
+HOME_PAGE_URL = QUrl.fromLocalFile(os.path.abspath(os.path.join(os.path.dirname(__file__), "home.html")))
 
 HISTORY_FILE = "history.json"
 BOOKMARKS_FILE = "bookmarks.json"
@@ -53,7 +42,7 @@ class OrionBrowser(QMainWindow):
         self.tabs.setDocumentMode(True)
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
-        self.tabs.currentChanged.connect(self.tab_changed)
+        self.tabs.currentChanged.connect(self.on_tab_changed)
 
         self.setCentralWidget(self.tabs)
 
@@ -103,15 +92,10 @@ class OrionBrowser(QMainWindow):
         return self.tabs.currentWidget()
 
     def add_new_tab(self, qurl=None, label="New Tab"):
-        if not isinstance(qurl, QUrl):
+        if qurl is None or not isinstance(qurl, QUrl):
             qurl = HOME_PAGE_URL
 
         browser = QWebEngineView()
-        s = browser.settings()
-        s.setAttribute(QWebEngineSettings.PluginsEnabled, False)
-        s.setAttribute(QWebEngineSettings.WebGLEnabled, False)
-        s.setAttribute(QWebEngineSettings.Accelerated2dCanvasEnabled, False)
-        s.setAttribute(QWebEngineSettings.ScrollAnimatorEnabled, False)
         browser.setUrl(qurl)
 
         index = self.tabs.addTab(browser, label)
@@ -148,7 +132,7 @@ class OrionBrowser(QMainWindow):
         if self.current_browser() == browser:
             self.url_bar.setText(qurl.toString())
 
-    def tab_changed(self, index):
+    def on_tab_changed(self, index):
         browser = self.tabs.widget(index)
         if browser is not None:
             self.url_bar.setText(browser.url().toString())
@@ -174,6 +158,16 @@ class OrionBrowser(QMainWindow):
                     print(f" - {item['title']}: {item['url']}")
         except Exception as e:
             print("Bookmarks error:", e)
+
+    def show_history(self):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+            print("\n--- BROWSER HISTORY ---")
+            for item in history:
+                print(f" - {item.get('title', '')}: {item.get('url', '')}")
+        except Exception as e:
+            print("History error:", e)
 
     def save_to_history(self, title, url):
         try:
@@ -234,6 +228,7 @@ QScrollBar::handle:vertical { background: #7b2ff7; border-radius: 5px; }
 
 
 if __name__ == "__main__":
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     app = QApplication(sys.argv)
     QApplication.setApplicationName("Orion Browser")
     window = OrionBrowser()
