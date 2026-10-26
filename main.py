@@ -1,64 +1,247 @@
-#PyQt5 is a set of Python bindings for Qt libraries which can be used to create cross-platform applications. Below is a simple example of how to create a basic browser window using PyQt5.
+# Orion Browser
+# This file builds a small web browser with PyQt5 (Python + Qt).
+# PyQt5 lets Python create windows, buttons, and a Chromium web view.
 
-import json
-import os
-import sys
-import traceback
+# --- built-in Python libraries ---
+import atexit        # run cleanup when the app closes normally
+import json          # read/write history and bookmarks as JSON files
+import os            # file paths, folders, environment variables
+import shutil        # copy old history files into the new data folder
+import sys           # command-line args and the process (exit, exception hook)
+import traceback     # print a full error if something crashes
+from datetime import datetime              # timestamps for history entries
+from urllib.parse import parse_qs, unquote, urlparse  # pull search text out of Google URLs
 
-# Qt WebEngine on Wayland often crashes with EGL_BAD_CONTEXT /
-# "The Wayland connection experienced a fatal error". Use XWayland
-# and Chromium software rendering before any Qt modules load.
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-os.environ.setdefault(
-    "QTWEBENGINE_CHROMIUM_FLAGS",
-    "--disable-gpu --disable-gpu-compositing --disable-gpu-sandbox",
-)
+# Folder that contains this script (main.py and home.html).
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+HISTORY_LIMIT = 500  # keep only the newest 500 history entries
+USE_SOFTWARE_RENDERING = False  # True on weak/broken GPUs after a crash
 
-from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar, QAction, QLineEdit
-from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import Qt, QUrl
+
+def user_data_dir():
+    # Writable place for history, cache, and crash flags on every OS.
+    if sys.platform == "win32":
+        root = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(root, "OrionBrowser")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/OrionBrowser")
+    root = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(root, "orion-browser")
+
+
+DATA_DIR = user_data_dir()
+os.makedirs(DATA_DIR, exist_ok=True)
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
+BOOKMARKS_FILE = os.path.join(DATA_DIR, "bookmarks.json")
+CRASH_SENTINEL = os.path.join(DATA_DIR, "did_not_exit_cleanly")
+GPU_BROKEN_FLAG = os.path.join(DATA_DIR, "use_software_gpu")
+
+
+def env_on(name):
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def configure_environment():
+    """Tune Qt/Chromium for this PC before Qt libraries load."""
+    global USE_SOFTWARE_RENDERING
+
+    # Sharp UI on HiDPI / Retina screens (Windows, macOS, Linux).
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+
+    # Qt5 WebEngine is unstable on native Wayland. Use XWayland on Linux only.
+    # Never set xcb on Windows or macOS — that would prevent the app from starting.
+    if sys.platform.startswith("linux"):
+        if os.environ.get("WAYLAND_DISPLAY") and "QT_QPA_PLATFORM" not in os.environ:
+            os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+    # Last run died mid-start -> treat GPU as unsafe next time.
+    if os.path.exists(CRASH_SENTINEL):
+        open(GPU_BROKEN_FLAG, "a").close()
+    open(CRASH_SENTINEL, "a").close()  # removed on a clean shutdown
+
+    USE_SOFTWARE_RENDERING = env_on("ORION_SAFE_MODE") or os.path.exists(GPU_BROKEN_FLAG)
+
+    flags = []
+    if USE_SOFTWARE_RENDERING:
+        # Slow but works on almost every GPU/driver.
+        flags.extend(["--disable-gpu", "--disable-gpu-compositing"])
+    else:
+        # Faster path when the graphics driver is healthy.
+        flags.append("--enable-gpu-rasterization")
+
+    flags.append("--disable-gpu-sandbox")
+    flags.append("--disable-background-networking")
+    flags.append("--disk-cache-size=83886080")  # 80 MB cache, avoids filling small disks
+
+    # Chromium refuses its sandbox when running as root (some Linux setups).
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        flags.extend(["--no-sandbox", "--disable-setuid-sandbox"])
+
+    if "QTWEBENGINE_CHROMIUM_FLAGS" not in os.environ:
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+
+
+def mark_clean_exit():
+    # Reaching here means the window closed normally, not a GPU crash.
+    try:
+        if os.path.exists(CRASH_SENTINEL):
+            os.remove(CRASH_SENTINEL)
+    except OSError:
+        pass
+
+
+configure_environment()
+atexit.register(mark_clean_exit)
+
+# --- Qt widgets used for the window UI ---
+try:
+    from PyQt5.QtWidgets import (
+        QAction,
+        QApplication,
+        QDialog,
+        QHBoxLayout,
+        QLabel,
+        QLineEdit,
+        QListWidget,
+        QListWidgetItem,
+        QMainWindow,
+        QMessageBox,
+        QPushButton,
+        QTabWidget,
+        QToolBar,
+        QVBoxLayout,
+    )
+    from PyQt5.QtCore import Qt, QUrl
+except ImportError:
+    sys.stderr.write(
+        "PyQt5 is missing.\n"
+        "  pip install PyQt5 PyQtWebEngine\n"
+        "  Fedora: sudo dnf install python3-qt5 python3-qt5-webengine\n"
+    )
+    sys.exit(1)
+
+try:
+    from PyQt5.QtWebEngineWidgets import (
+        QWebEngineProfile,
+        QWebEngineSettings,
+        QWebEngineView,
+    )
+except ImportError:
+    sys.stderr.write(
+        "Qt WebEngine is missing (needed to show web pages).\n"
+        "  pip install PyQtWebEngine\n"
+        "  Fedora: sudo dnf install python3-qt5-webengine\n"
+    )
+    sys.exit(1)
 
 
 def show_error(exc_type, exc_value, exc_tb):
+    # Print Python exceptions that happen inside Qt (otherwise they can vanish).
     traceback.print_exception(exc_type, exc_value, exc_tb)
 
 sys.excepthook = show_error
 
-HOME_PAGE_URL = QUrl.fromLocalFile(os.path.abspath(os.path.join(os.path.dirname(__file__), "home.html")))
+HOME_HTML = os.path.join(BASE_DIR, "home.html")
+HOME_PAGE_URL = QUrl.fromLocalFile(HOME_HTML)
 
-HISTORY_FILE = "history.json"
-BOOKMARKS_FILE = "bookmarks.json"
+
+def migrate_old_json():
+    # Keep using history/bookmarks if they still live next to main.py.
+    for name, dest in (("history.json", HISTORY_FILE), ("bookmarks.json", BOOKMARKS_FILE)):
+        old = os.path.join(BASE_DIR, name)
+        if os.path.exists(old) and not os.path.exists(dest):
+            try:
+                shutil.copy2(old, dest)
+            except OSError:
+                pass
+
+
+def configure_webengine():
+    """Put Chromium cache in a writable folder and turn off extra work."""
+    cache_dir = os.path.join(DATA_DIR, "cache")
+    storage_dir = os.path.join(DATA_DIR, "storage")
+    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(storage_dir, exist_ok=True)
+
+    profile = QWebEngineProfile.defaultProfile()
+    profile.setCachePath(cache_dir)
+    profile.setPersistentStoragePath(storage_dir)
+    profile.setHttpCacheType(QWebEngineProfile.DiskHttpCache)
+    profile.setHttpCacheMaximumSize(80 * 1024 * 1024)
+
+    settings = QWebEngineSettings.defaultSettings()
+    settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
+    settings.setAttribute(QWebEngineSettings.LocalStorageEnabled, True)
+    settings.setAttribute(QWebEngineSettings.PluginsEnabled, False)
+    settings.setAttribute(QWebEngineSettings.FullScreenSupportEnabled, True)
+    settings.setAttribute(QWebEngineSettings.ErrorPageEnabled, True)
+    settings.setAttribute(QWebEngineSettings.WebGLEnabled, not USE_SOFTWARE_RENDERING)
+    settings.setAttribute(QWebEngineSettings.Accelerated2dCanvasEnabled, not USE_SOFTWARE_RENDERING)
+
+
+def search_query_from_url(url):
+    """If this URL is a Google search, return the typed query. Else return ''."""
+    parsed = urlparse(url)  # split url into host, path, query string
+    host = (parsed.netloc or "").lower()
+    # Example: https://www.google.com/search?q=cats
+    if "google." in host and parsed.path.startswith("/search"):
+        values = parse_qs(parsed.query).get("q", [])  # get the q= parameter
+        if values:
+            # Convert %20 / + into a readable phrase.
+            return unquote(values[0]).replace("+", " ").strip()
+    return ""
+
+
+def load_json_list(path):
+    """Open a JSON file and return a list. If missing or broken, return []."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_json_list(path, data):
+    """Write a Python list to disk as pretty JSON."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
 
 class OrionBrowser(QMainWindow):
+    """The main browser window: tabs, toolbar, address bar, history."""
+
     def __init__(self):
-        super().__init__()
-        self.setStyleSheet(GALAXY_QSS)
-        self.setWindowTitle("Orion Browser")
-        self.setGeometry(100, 100, 1920, 1080)
+        super().__init__()  # create the QMainWindow
+        self.setStyleSheet(GALAXY_QSS)          # purple "galaxy" look
+        self.setWindowTitle("Orion Browser")    # text in the title bar
+        self.fit_to_screen()                    # size the window to this monitor
 
-        self.init_storage()
+        self.init_storage()  # make sure history.json / bookmarks.json exist
 
+        # Tab strip in the center of the window.
         self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.setTabsClosable(True)
-        self.tabs.tabCloseRequested.connect(self.close_tab)
-        self.tabs.currentChanged.connect(self.on_tab_changed)
-
+        self.tabs.setDocumentMode(True)   # simpler tab look
+        self.tabs.setTabsClosable(True)   # show an X on each tab
+        self.tabs.tabCloseRequested.connect(self.close_tab)     # X clicked
+        self.tabs.currentChanged.connect(self.on_tab_changed)  # another tab selected
         self.setCentralWidget(self.tabs)
 
+        # Top toolbar (back, forward, reload, +, star, url, history).
         navbar = QToolBar()
         self.addToolBar(navbar)
 
         back_btn = QAction("◄", self)
-        back_btn.triggered.connect(lambda: self.go_back())
+        back_btn.triggered.connect(lambda: self.go_back())  # previous page
         navbar.addAction(back_btn)
 
         forward_btn = QAction("►", self)
-        forward_btn.triggered.connect(lambda: self.go_forward())
+        forward_btn.triggered.connect(lambda: self.go_forward())  # next page
         navbar.addAction(forward_btn)
 
         reload_btn = QAction("⟳", self)
-        reload_btn.triggered.connect(lambda: self.reload_page())
+        reload_btn.triggered.connect(lambda: self.reload_page())  # refresh
         navbar.addAction(reload_btn)
 
         add_tab_btn = QAction("+", self)
@@ -69,70 +252,103 @@ class OrionBrowser(QMainWindow):
         bookmark_btn.triggered.connect(lambda: self.add_to_bookmarks())
         navbar.addAction(bookmark_btn)
 
-        self.url_bar = QLineEdit()
-        self.url_bar.returnPressed.connect(self.navigate_to_url)
+        self.url_bar = QLineEdit()  # address / search box
+        self.url_bar.returnPressed.connect(self.navigate_to_url)  # Enter key
         navbar.addWidget(self.url_bar)
 
         history_btn = QAction("History", self)
         history_btn.triggered.connect(lambda: self.show_history())
         navbar.addAction(history_btn)
 
+        # Open the first tab on the local homepage.
         self.add_new_tab(HOME_PAGE_URL, "homepage")
 
-    def init_storage(self):
-        if not os.path.exists(HISTORY_FILE):
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump([], f)
+    def fit_to_screen(self):
+        # 1920x1080 does not fit laptops or small monitors. Use ~85% of this screen.
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1024, 700)
+            return
+        area = screen.availableGeometry()
+        width = max(800, min(int(area.width() * 0.85), area.width() - 24))
+        height = max(560, min(int(area.height() * 0.85), area.height() - 24))
+        self.resize(width, height)
+        frame = self.frameGeometry()
+        frame.moveCenter(area.center())
+        self.move(frame.topLeft())
 
-        if not os.path.exists(BOOKMARKS_FILE):
-            with open(BOOKMARKS_FILE, "w", encoding="utf-8") as f:
-                json.dump([], f)
+    def init_storage(self):
+        migrate_old_json()
+        # Create empty JSON files the first time the browser runs.
+        for path in (HISTORY_FILE, BOOKMARKS_FILE):
+            if not os.path.exists(path):
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump([], f)
 
     def current_browser(self):
+        # The QWebEngineView inside the tab you are looking at.
         return self.tabs.currentWidget()
 
     def add_new_tab(self, qurl=None, label="New Tab"):
+        # If no valid URL was given, open the homepage.
         if qurl is None or not isinstance(qurl, QUrl):
             qurl = HOME_PAGE_URL
 
-        browser = QWebEngineView()
+        browser = QWebEngineView()  # one Chromium page
         browser.setUrl(qurl)
 
-        index = self.tabs.addTab(browser, label)
-        self.tabs.setCurrentIndex(index)
+        index = self.tabs.addTab(browser, label)  # add it as a tab
+        self.tabs.setCurrentIndex(index)          # switch to that tab
 
+        # Keep the address bar in sync when this tab's URL changes.
         browser.urlChanged.connect(lambda qurl, browser=browser: self.update_url_bar(qurl, browser))
-        browser.loadFinished.connect(lambda _, index=index, browser=browser: self.update_tab_title(index))
+        # When the page finishes, update the tab title and save history.
+        browser.loadFinished.connect(lambda ok, browser=browser: self.on_page_loaded(ok, browser))
 
-    def update_tab_title(self, index):
-        browser = self.tabs.widget(index)
-        if index != -1 and browser is not None:
-            self.tabs.setTabText(index, browser.page().title())
-            url = browser.url().toString()
-            self.update_url_bar(QUrl(url), browser)
+    def on_page_loaded(self, ok, browser):
+        # ok is False if the page failed to load.
+        if not ok or browser is None:
+            return
+
+        index = self.tabs.indexOf(browser)  # which tab this page belongs to
+        title = browser.page().title() or browser.url().toString()
+        if index != -1:
+            self.tabs.setTabText(index, title)           # tab label = page title
+            self.update_url_bar(browser.url(), browser)  # address bar = page url
+
+        self.save_to_history(title, browser.url().toString())
 
     def close_tab(self, index):
+        # Do not close the last remaining tab.
         if self.tabs.count() < 2:
             return
         self.tabs.removeTab(index)
 
     def navigate_to_url(self):
+        # User pressed Enter in the address bar.
         text = self.url_bar.text()
         if not text.startswith("http://") and not text.startswith("https://"):
             if "." in text and " " not in text:
-                url = QUrl("https://" + text)
+                url = QUrl("https://" + text)  # looks like a site: example.com
             else:
-                url = QUrl(f"https://www.google.com/search?q={text}")
+                url = QUrl(f"https://www.google.com/search?q={text}")  # treat as search
         else:
-            url = QUrl(text)
+            url = QUrl(text)  # already a full URL
 
         self.current_browser().setUrl(url)
 
+        # If this was a Google search, store it in search history right away.
+        query = search_query_from_url(url.toString())
+        if query:
+            self.save_to_history(query, url.toString(), kind="search", query=query)
+
     def update_url_bar(self, qurl, browser):
+        # Only change the address bar if THIS tab is the one you are viewing.
         if self.current_browser() == browser:
             self.url_bar.setText(qurl.toString())
 
     def on_tab_changed(self, index):
+        # Switching tabs: show that tab's URL in the address bar.
         browser = self.tabs.widget(index)
         if browser is not None:
             self.url_bar.setText(browser.url().toString())
@@ -150,6 +366,7 @@ class OrionBrowser(QMainWindow):
             self.current_browser().reload()
 
     def add_to_bookmarks(self):
+        # Currently only prints bookmarks to the terminal (not a full bookmark UI yet).
         try:
             with open(BOOKMARKS_FILE, "r", encoding="utf-8") as f:
                 bookmarks = json.load(f)
@@ -160,32 +377,172 @@ class OrionBrowser(QMainWindow):
             print("Bookmarks error:", e)
 
     def show_history(self):
+        # Open the History popup. If the user picks a URL, load it in this tab.
+        dialog = HistoryDialog(self)
+        if dialog.exec_() == QDialog.Accepted and dialog.selected_url:
+            self.current_browser().setUrl(QUrl(dialog.selected_url))
+
+    def save_to_history(self, title, url, kind=None, query=""):
+        # Store one visit or search into history.json.
+        url = (url or "").strip()
+        # Skip blank pages and the local homepage.
+        if not url or url in ("about:blank", HOME_PAGE_URL.toString()):
+            return
+        if url.startswith(("chrome:", "data:", "javascript:")):
+            return
+
+        query = query or search_query_from_url(url)
+        if kind is None:
+            kind = "search" if query else "page"  # Google URL = search, otherwise a page
+
+        entry = {
+            "title": title or query or url,  # what to show in the list
+            "url": url,                      # where to go if opened again
+            "kind": kind,                    # "search" or "page"
+            "query": query,                  # search text, if any
+            "visited_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+
         try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                history = json.load(f)
-            print("\n--- BROWSER HISTORY ---")
-            for item in history:
-                print(f" - {item.get('title', '')}: {item.get('url', '')}")
+            history = load_json_list(HISTORY_FILE)
+            # If you refresh the same URL, update the last row instead of duplicating.
+            if history and history[-1].get("url") == url:
+                history[-1] = entry
+            else:
+                history.append(entry)
+            save_json_list(HISTORY_FILE, history[-HISTORY_LIMIT:])
         except Exception as e:
             print("History error:", e)
 
-    def save_to_history(self, title, url):
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                history = json.load(f)
 
-            history.append({"title": title, "url": url})
+class HistoryDialog(QDialog):
+    """Popup that lists searches and visited pages."""
 
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print("History error:", e)
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.selected_url = ""  # filled when the user opens an item
+        self.setWindowTitle("History")
+        self.resize(720, 560)
+        self.setStyleSheet(GALAXY_QSS)
 
+        layout = QVBoxLayout(self)  # stack widgets from top to bottom
+
+        heading = QLabel("History")
+        heading.setStyleSheet("font-size: 22px; font-weight: 600; padding: 4px 0;")
+        layout.addWidget(heading)
+
+        self.filter_bar = QLineEdit()
+        self.filter_bar.setPlaceholderText("Filter visits and searches...")
+        self.filter_bar.textChanged.connect(self.populate_lists)  # re-filter as you type
+        layout.addWidget(self.filter_bar)
+
+        layout.addWidget(QLabel("Searches"))
+        self.search_list = QListWidget()
+        self.search_list.setWordWrap(True)
+        self.search_list.itemActivated.connect(self.open_item)       # Enter
+        self.search_list.itemDoubleClicked.connect(self.open_item)  # double-click
+        layout.addWidget(self.search_list, 1)  # stretch factor 1
+
+        layout.addWidget(QLabel("Visited pages"))
+        self.page_list = QListWidget()
+        self.page_list.setWordWrap(True)
+        self.page_list.itemActivated.connect(self.open_item)
+        self.page_list.itemDoubleClicked.connect(self.open_item)
+        layout.addWidget(self.page_list, 2)  # a bit taller than searches
+
+        buttons = QHBoxLayout()  # row of buttons at the bottom
+        open_btn = QPushButton("Open")
+        open_btn.clicked.connect(self.open_selected)
+        clear_btn = QPushButton("Clear history")
+        clear_btn.clicked.connect(self.clear_history)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)  # close without opening a URL
+        buttons.addWidget(open_btn)
+        buttons.addWidget(clear_btn)
+        buttons.addStretch()  # push Close to the right
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        self.populate_lists()  # fill the lists when the window opens
+
+    def populate_lists(self):
+        # Rebuild both lists from history.json, newest first, using the filter text.
+        needle = self.filter_bar.text().strip().lower()
+        history = list(reversed(load_json_list(HISTORY_FILE)))
+
+        self.search_list.clear()
+        self.page_list.clear()
+        seen_searches = set()  # show each search phrase only once
+
+        for item in history:
+            url = item.get("url", "")
+            title = item.get("title") or url
+            query = item.get("query") or search_query_from_url(url)
+            visited_at = item.get("visited_at", "")
+            kind = item.get("kind") or ("search" if query else "page")
+            haystack = " ".join([title, url, query, visited_at]).lower()
+            if needle and needle not in haystack:
+                continue  # does not match the filter box
+
+            if kind == "search" and query:
+                key = query.lower()
+                if key in seen_searches:
+                    continue
+                seen_searches.add(key)
+                label = f"{query}\n{visited_at}  {url}".strip()
+                self._add_item(self.search_list, label, url)
+            else:
+                label = f"{title}\n{visited_at}  {url}".strip()
+                self._add_item(self.page_list, label, url)
+
+        # Empty-state messages (not clickable).
+        if self.search_list.count() == 0:
+            placeholder = QListWidgetItem("No searches yet. Type a query in the address bar.")
+            placeholder.setFlags(Qt.NoItemFlags)
+            self.search_list.addItem(placeholder)
+
+        if self.page_list.count() == 0:
+            placeholder = QListWidgetItem("No visited pages yet.")
+            placeholder.setFlags(Qt.NoItemFlags)
+            self.page_list.addItem(placeholder)
+
+    def _add_item(self, widget, label, url):
+        # One visible row. The real URL is stored on the item, hidden from the label.
+        row = QListWidgetItem(label)
+        row.setData(Qt.UserRole, url)
+        widget.addItem(row)
+
+    def current_item(self):
+        # Prefer a selected search, otherwise a selected page. Skip placeholders.
+        for widget in (self.search_list, self.page_list):
+            item = widget.currentItem()
+            if item is not None and item.data(Qt.UserRole):
+                return item
+        return None
+
+    def open_item(self, item):
+        # Remember the URL and close the dialog with "Accepted".
+        url = item.data(Qt.UserRole) if item is not None else ""
+        if url:
+            self.selected_url = url
+            self.accept()
+
+    def open_selected(self):
+        # The Open button uses whichever row is currently selected.
+        self.open_item(self.current_item())
+
+    def clear_history(self):
+        # Wipe history.json, then refresh the lists.
+        save_json_list(HISTORY_FILE, [])
+        self.populate_lists()
+
+
+# Qt Style Sheet (like CSS) for the window, tabs, address bar, and buttons.
 GALAXY_QSS = """
 QMainWindow, QWidget {
     background-color: #0b0720;      /* deep space */
     color: #e6dcff;
-    font-family: 'Segoe UI';
+    font-family: 'Segoe UI', 'Noto Sans', 'Ubuntu', 'DejaVu Sans', sans-serif;
     font-size: 14px;
 }
 
@@ -227,10 +584,32 @@ QScrollBar::handle:vertical { background: #7b2ff7; border-radius: 5px; }
 """
 
 
+# This block runs only when you start the file with: python main.py
+# (It does not run if another file imports this one.)
 if __name__ == "__main__":
-    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+    # These attributes must be set before QApplication is created.
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)  # needed by Qt WebEngine
+    try:
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except AttributeError:
+        pass
+
     app = QApplication(sys.argv)
-    QApplication.setApplicationName("Orion Browser")
+    app.setOrganizationName("Orion")
+    app.setApplicationName("Orion Browser")
+    configure_webengine()
+
+    if not os.path.exists(HOME_HTML):
+        QMessageBox.warning(
+            None,
+            "Orion Browser",
+            "home.html was not found next to main.py.\nThe first tab may be blank.",
+        )
+
     window = OrionBrowser()
     window.show()
     sys.exit(app.exec_())

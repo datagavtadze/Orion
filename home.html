@@ -36,12 +36,16 @@
       radial-gradient(ellipse 35% 30% at 10% 85%, rgba(199, 125, 255, 0.4), transparent 70%),
       radial-gradient(ellipse 60% 50% at 50% 50%, rgba(30, 12, 80, 0.8), transparent 80%),
       var(--space);
-    filter: blur(40px);
+    filter: blur(28px);
     animation: drift 40s ease-in-out infinite alternate;
+    will-change: transform;
   }
   @keyframes drift {
     from { transform: translate(-2%, -1%) scale(1); }
     to   { transform: translate(2%, 2%) scale(1.08); }
+  }
+  @media (prefers-reduced-motion: reduce), (max-width: 900px) {
+    .galaxy { animation: none; filter: blur(16px); will-change: auto; }
   }
 
   /* Stars sit on a canvas above the blurred nebula */
@@ -213,12 +217,17 @@
   let stars = [];
 
   function resize() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    const count = Math.floor((canvas.width * canvas.height) / 6000);
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    canvas.width = Math.floor(window.innerWidth * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    canvas.style.width = window.innerWidth + "px";
+    canvas.style.height = window.innerHeight + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const area = window.innerWidth * window.innerHeight;
+    const count = Math.min(160, Math.max(40, Math.floor(area / 16000)));
     stars = Array.from({ length: count }, () => ({
-      x: Math.random() * canvas.width,
-      y: Math.random() * canvas.height,
+      x: Math.random() * window.innerWidth,
+      y: Math.random() * window.innerHeight,
       r: Math.random() * 1.4 + 0.2,
       phase: Math.random() * Math.PI * 2,
       speed: Math.random() * 0.02 + 0.005
@@ -228,8 +237,9 @@
   resize();
 
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let raf = 0;
   function draw() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     for (const s of stars) {
       s.phase += s.speed;
       const a = reduce ? 0.7 : 0.35 + 0.65 * Math.abs(Math.sin(s.phase));
@@ -238,8 +248,15 @@
       ctx.fillStyle = "rgba(255, 245, 255, " + a + ")";
       ctx.fill();
     }
-    requestAnimationFrame(draw);
+    raf = requestAnimationFrame(draw);
   }
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      cancelAnimationFrame(raf);
+    } else {
+      draw();
+    }
+  });
   draw();
 </script>
 </body>
