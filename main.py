@@ -12,8 +12,44 @@ import traceback     # print a full error if something crashes
 from datetime import datetime              # timestamps for history entries
 from urllib.parse import parse_qs, unquote, urlparse  # pull search text out of Google URLs
 
-# Folder that contains this script (main.py and home.html).
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def running_frozen():
+    # True when this is a packaged app (.exe / frozen binary), not "python main.py".
+    return getattr(sys, "frozen", False)
+
+
+def app_dir():
+    # Folder of the .exe (packaged) or of main.py (development).
+    if running_frozen():
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def resource_dir():
+    # PyInstaller unpacks bundled files (home.html) into sys._MEIPASS.
+    if running_frozen() and hasattr(sys, "_MEIPASS"):
+        return sys._MEIPASS
+    return app_dir()
+
+
+def find_home_html():
+    # Find the homepage in every layout: source folder, .exe bundle, .deb / .rpm install.
+    override = os.environ.get("ORION_HOME_HTML", "").strip()
+    candidates = [
+        override,
+        os.path.join(resource_dir(), "home.html"),
+        os.path.join(app_dir(), "home.html"),
+        os.path.join(app_dir(), "share", "orion-browser", "home.html"),
+        os.path.join(os.path.dirname(app_dir()), "share", "orion-browser", "home.html"),
+        "/usr/share/orion-browser/home.html",
+        "/usr/local/share/orion-browser/home.html",
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return os.path.abspath(path)
+    return os.path.join(resource_dir(), "home.html")
+
+
+BASE_DIR = app_dir()
 HISTORY_LIMIT = 500  # keep only the newest 500 history entries
 USE_SOFTWARE_RENDERING = False  # True on weak/broken GPUs after a crash
 
@@ -142,7 +178,7 @@ def show_error(exc_type, exc_value, exc_tb):
 
 sys.excepthook = show_error
 
-HOME_HTML = os.path.join(BASE_DIR, "home.html")
+HOME_HTML = find_home_html()
 HOME_PAGE_URL = QUrl.fromLocalFile(HOME_HTML)
 
 
@@ -248,20 +284,28 @@ class OrionBrowser(QMainWindow):
         add_tab_btn.triggered.connect(lambda: self.add_new_tab(HOME_PAGE_URL, "New Tab"))
         navbar.addAction(add_tab_btn)
 
-        bookmark_btn = QAction("★", self)
-        bookmark_btn.triggered.connect(lambda: self.add_to_bookmarks())
-        navbar.addAction(bookmark_btn)
+        self.bookmark_btn = QAction("☆", self)
+        self.bookmark_btn.setToolTip("Add bookmark")
+        self.bookmark_btn.triggered.connect(self.toggle_bookmark)
+        navbar.addAction(self.bookmark_btn)
 
         self.url_bar = QLineEdit()  # address / search box
         self.url_bar.returnPressed.connect(self.navigate_to_url)  # Enter key
         navbar.addWidget(self.url_bar)
 
+        bookmarks_btn = QAction("Bookmarks", self)
+        bookmarks_btn.triggered.connect(self.show_bookmarks)
+        navbar.addAction(bookmarks_btn)
+
         history_btn = QAction("History", self)
-        history_btn.triggered.connect(lambda: self.show_history())
+        history_btn.triggered.connect(self.show_history)
         navbar.addAction(history_btn)
+
+        self.statusBar().showMessage("Ready")
 
         # Open the first tab on the local homepage.
         self.add_new_tab(HOME_PAGE_URL, "homepage")
+        self.update_bookmark_star()
 
     def fit_to_screen(self):
         # 1920x1080 does not fit laptops or small monitors. Use ~85% of this screen.
@@ -346,12 +390,14 @@ class OrionBrowser(QMainWindow):
         # Only change the address bar if THIS tab is the one you are viewing.
         if self.current_browser() == browser:
             self.url_bar.setText(qurl.toString())
+            self.update_bookmark_star()
 
     def on_tab_changed(self, index):
         # Switching tabs: show that tab's URL in the address bar.
         browser = self.tabs.widget(index)
         if browser is not None:
             self.url_bar.setText(browser.url().toString())
+            self.update_bookmark_star()
 
     def go_back(self):
         if self.current_browser() is not None:
@@ -365,16 +411,56 @@ class OrionBrowser(QMainWindow):
         if self.current_browser() is not None:
             self.current_browser().reload()
 
-    def add_to_bookmarks(self):
-        # Currently only prints bookmarks to the terminal (not a full bookmark UI yet).
+    def current_page_info(self):
+        browser = self.current_browser()
+        if browser is None:
+            return "", ""
+        url = browser.url().toString().strip()
+        title = (browser.page().title() or url).strip()
+        return title, url
+
+    def is_bookmarked(self, url):
+        return any((item.get("url") or "") == url for item in load_json_list(BOOKMARKS_FILE))
+
+    def update_bookmark_star(self):
+        _, url = self.current_page_info()
+        saved = bool(url) and self.is_bookmarked(url)
+        self.bookmark_btn.setText("★" if saved else "☆")
+        self.bookmark_btn.setToolTip("Remove bookmark" if saved else "Add bookmark")
+
+    def toggle_bookmark(self):
+        # Star: save this page, or remove it if it is already bookmarked.
+        title, url = self.current_page_info()
+        if not url or url in ("about:blank",) or url.startswith(("chrome:", "data:", "javascript:")):
+            self.statusBar().showMessage("Nothing to bookmark on this page", 2500)
+            return
+
         try:
-            with open(BOOKMARKS_FILE, "r", encoding="utf-8") as f:
-                bookmarks = json.load(f)
-                print("\n--- ⭐ BROWSER BOOKMARKS ---")
-                for item in bookmarks:
-                    print(f" - {item['title']}: {item['url']}")
+            bookmarks = load_json_list(BOOKMARKS_FILE)
+            existing = [item for item in bookmarks if item.get("url") == url]
+            if existing:
+                bookmarks = [item for item in bookmarks if item.get("url") != url]
+                save_json_list(BOOKMARKS_FILE, bookmarks)
+                self.statusBar().showMessage("Bookmark removed", 2500)
+            else:
+                bookmarks.append({
+                    "title": title or url,
+                    "url": url,
+                    "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                })
+                save_json_list(BOOKMARKS_FILE, bookmarks)
+                self.statusBar().showMessage("Page bookmarked", 2500)
         except Exception as e:
-            print("Bookmarks error:", e)
+            self.statusBar().showMessage("Bookmarks error: " + str(e), 4000)
+
+        self.update_bookmark_star()
+
+    def show_bookmarks(self):
+        # Open the Bookmarks popup. If the user picks a URL, load it in this tab.
+        dialog = BookmarksDialog(self)
+        if dialog.exec_() == QDialog.Accepted and dialog.selected_url:
+            self.current_browser().setUrl(QUrl(dialog.selected_url))
+        self.update_bookmark_star()
 
     def show_history(self):
         # Open the History popup. If the user picks a URL, load it in this tab.
@@ -537,6 +623,99 @@ class HistoryDialog(QDialog):
         self.populate_lists()
 
 
+class BookmarksDialog(QDialog):
+    """Popup that lists saved bookmarks."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.selected_url = ""
+        self.setWindowTitle("Bookmarks")
+        self.resize(720, 520)
+        self.setStyleSheet(GALAXY_QSS)
+
+        layout = QVBoxLayout(self)
+
+        heading = QLabel("Bookmarks")
+        heading.setStyleSheet("font-size: 22px; font-weight: 600; padding: 4px 0;")
+        layout.addWidget(heading)
+
+        hint = QLabel("Press ★ on a page to save it. Double-click a row to open it.")
+        hint.setStyleSheet("color: #cbb8ff; padding-bottom: 4px;")
+        layout.addWidget(hint)
+
+        self.filter_bar = QLineEdit()
+        self.filter_bar.setPlaceholderText("Filter bookmarks...")
+        self.filter_bar.textChanged.connect(self.populate_list)
+        layout.addWidget(self.filter_bar)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setWordWrap(True)
+        self.list_widget.itemActivated.connect(self.open_item)
+        self.list_widget.itemDoubleClicked.connect(self.open_item)
+        layout.addWidget(self.list_widget, 1)
+
+        buttons = QHBoxLayout()
+        open_btn = QPushButton("Open")
+        open_btn.clicked.connect(self.open_selected)
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self.remove_selected)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        buttons.addWidget(open_btn)
+        buttons.addWidget(remove_btn)
+        buttons.addStretch()
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        self.populate_list()
+
+    def populate_list(self):
+        needle = self.filter_bar.text().strip().lower()
+        bookmarks = list(reversed(load_json_list(BOOKMARKS_FILE)))
+
+        self.list_widget.clear()
+        for item in bookmarks:
+            url = item.get("url", "")
+            title = item.get("title") or url
+            saved_at = item.get("saved_at", "")
+            haystack = " ".join([title, url, saved_at]).lower()
+            if needle and needle not in haystack:
+                continue
+            label = f"{title}\n{saved_at}  {url}".strip()
+            row = QListWidgetItem(label)
+            row.setData(Qt.UserRole, url)
+            self.list_widget.addItem(row)
+
+        if self.list_widget.count() == 0:
+            placeholder = QListWidgetItem("No bookmarks yet. Open a page and press ★.")
+            placeholder.setFlags(Qt.NoItemFlags)
+            self.list_widget.addItem(placeholder)
+
+    def current_item(self):
+        item = self.list_widget.currentItem()
+        if item is not None and item.data(Qt.UserRole):
+            return item
+        return None
+
+    def open_item(self, item):
+        url = item.data(Qt.UserRole) if item is not None else ""
+        if url:
+            self.selected_url = url
+            self.accept()
+
+    def open_selected(self):
+        self.open_item(self.current_item())
+
+    def remove_selected(self):
+        item = self.current_item()
+        if item is None:
+            return
+        url = item.data(Qt.UserRole)
+        bookmarks = [row for row in load_json_list(BOOKMARKS_FILE) if row.get("url") != url]
+        save_json_list(BOOKMARKS_FILE, bookmarks)
+        self.populate_list()
+
+
 # Qt Style Sheet (like CSS) for the window, tabs, address bar, and buttons.
 GALAXY_QSS = """
 QMainWindow, QWidget {
@@ -566,6 +745,8 @@ QPushButton:hover, QToolButton:hover { background-color: #7b2ff7; }
 QPushButton:pressed, QToolButton:pressed { background-color: #5a1fc0; }
 
 QToolBar { background: #120a30; border: none; spacing: 6px; padding: 4px; }
+
+QStatusBar { background: #120a30; color: #cbb8ff; }
 
 QTabWidget::pane { border: none; }
 QTabBar::tab {
